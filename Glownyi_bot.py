@@ -233,4 +233,6 @@ async def chat(operator, chat_id):
         await client.disconnect()
 
 if __name__ == '__main__':
-    app.run(debug=False)
+    import os
+    port = int(os.environ.get('PORT', 8080))
+    app.run(debug=False, host='0.0.0.0', port=port)
