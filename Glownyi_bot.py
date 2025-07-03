@@ -9,6 +9,8 @@ import os
 import json
 import sqlite3
 from datetime import datetime, timezone
+import threading
+import time
 
 app = Flask(__name__)
 CORS(app)  # Разрешаем CORS для всех доменов
@@ -18,16 +20,56 @@ api_id = 24914656
 api_hash = '126107e0e53e49d94b3d3512d0715198'
 
 OPERATORS_FILE = 'operators.json'
+lock = threading.Lock()
 
-def load_operators():
-    if os.path.exists(OPERATORS_FILE):
-        with open(OPERATORS_FILE, 'r') as f:
-            return json.load(f)
-    return []
+def load_operators_safe():
+    """Безопасная загрузка операторов с retry логикой"""
+    max_retries = 5
+    retry_delay = 0.1
+    
+    for attempt in range(max_retries):
+        try:
+            with lock:
+                if os.path.exists(OPERATORS_FILE):
+                    with open(OPERATORS_FILE, 'r') as f:
+                        return json.load(f)
+                return []
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Attempt {attempt + 1} failed to load operators: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                print("Failed to load operators after all retries")
+                return []
 
-def save_operators(operators):
-    with open(OPERATORS_FILE, 'w') as f:
-        json.dump(operators, f)
+def save_operators_safe(operators):
+    """Безопасное сохранение операторов с retry логикой"""
+    max_retries = 5
+    retry_delay = 0.1
+    
+    for attempt in range(max_retries):
+        try:
+            with lock:
+                # Сначала записываем во временный файл
+                temp_file = OPERATORS_FILE + '.tmp'
+                with open(temp_file, 'w') as f:
+                    json.dump(operators, f)
+                
+                # Атомарно заменяем оригинальный файл
+                if os.path.exists(OPERATORS_FILE):
+                    os.remove(OPERATORS_FILE)
+                os.rename(temp_file, OPERATORS_FILE)
+                return True
+        except IOError as e:
+            print(f"Attempt {attempt + 1} failed to save operators: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                print("Failed to save operators after all retries")
+                return False
+    return False
 
 @app.route('/', methods=['GET'])
 def health_check():
@@ -35,26 +77,30 @@ def health_check():
 
 @app.route('/api/operators', methods=['GET'])
 def get_operators():
-    operators = load_operators()
+    operators = load_operators_safe()
     return jsonify({'operators': operators})
 
 @app.route('/api/operators', methods=['POST'])
 def add_operator():
     data = request.get_json()
     operator = data.get('operator')
-    operators = load_operators()
+    operators = load_operators_safe()
     if operator and operator not in operators:
         operators.append(operator)
-        save_operators(operators)
-        return jsonify({'success': True, 'operators': operators})
+        if save_operators_safe(operators):
+            return jsonify({'success': True, 'operators': operators})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to save operator'})
     return jsonify({'success': False, 'error': 'Operator already exists or invalid'})
 
 @app.route('/api/operators/<operator>', methods=['DELETE'])
 def delete_operator(operator):
-    operators = load_operators()
+    operators = load_operators_safe()
     operators = [op for op in operators if op != operator]
-    save_operators(operators)
-    return jsonify({'success': True, 'operators': operators})
+    if save_operators_safe(operators):
+        return jsonify({'success': True, 'operators': operators})
+    else:
+        return jsonify({'success': False, 'error': 'Failed to delete operator'})
 
 def run_async(coro):
     try:
@@ -159,7 +205,7 @@ def get_chats(operator):
             for dialog in dialogs:
                 if not getattr(dialog.entity, 'bot', False) and dialog.entity.__class__.__name__ != 'UserEmpty':
                     # Получаем последнее сообщение
-                    last_message = dialog.message.message if dialog.message else 'Нет сообщений'
+                    last_message = dialog.message.message if dialog.message and dialog.message.message else 'Нет сообщений'
                     
                     # Подсчитываем непрочитанные
                     unread_count = 0
@@ -171,9 +217,22 @@ def get_chats(operator):
                             if not msg.out and not getattr(msg, 'read', True):
                                 unread_count += 1
                     
+                    # Безопасно получаем имя
+                    name = ""
+                    if hasattr(dialog.entity, 'first_name') and dialog.entity.first_name:
+                        name += dialog.entity.first_name
+                    if hasattr(dialog.entity, 'last_name') and dialog.entity.last_name:
+                        if name:
+                            name += " "
+                        name += dialog.entity.last_name
+                    if not name and hasattr(dialog.entity, 'title') and dialog.entity.title:
+                        name = dialog.entity.title
+                    if not name:
+                        name = f"User {dialog.id}"
+                    
                     chat_info = {
                         'id': str(dialog.id),
-                        'name': getattr(dialog.entity, 'first_name', '') + ' ' + getattr(dialog.entity, 'last_name', ''),
+                        'name': name,
                         'lastMessage': last_message[:100] + '...' if len(last_message) > 100 else last_message,
                         'timestamp': dialog.message.date.strftime('%H:%M') if dialog.message else '',
                         'unreadCount': unread_count,
@@ -205,9 +264,11 @@ def get_messages(operator, chat_id):
             
             messages = []
             async for msg in client.iter_messages(chat_id, limit=50, reverse=True):
+                message_text = msg.message if msg.message else ''
+                
                 message_data = {
                     'id': str(msg.id),
-                    'text': msg.message or '',
+                    'text': message_text,
                     'timestamp': msg.date.strftime('%H:%M'),
                     'isIncoming': not msg.out,
                     'isRead': getattr(msg, 'read', True),
