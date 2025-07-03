@@ -1,0 +1,1 @@
+web: python Glownyi_bot.py
