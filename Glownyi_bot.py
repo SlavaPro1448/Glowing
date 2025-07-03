@@ -11,6 +11,7 @@ import sqlite3
 from datetime import datetime, timezone
 import threading
 import time
+import hashlib
 
 app = Flask(__name__)
 CORS(app)  # Разрешаем CORS для всех доменов
@@ -22,54 +23,13 @@ api_hash = '126107e0e53e49d94b3d3512d0715198'
 OPERATORS_FILE = 'operators.json'
 lock = threading.Lock()
 
-def load_operators_safe():
-    """Безопасная загрузка операторов с retry логикой"""
-    max_retries = 5
-    retry_delay = 0.1
-    
-    for attempt in range(max_retries):
-        try:
-            with lock:
-                if os.path.exists(OPERATORS_FILE):
-                    with open(OPERATORS_FILE, 'r') as f:
-                        return json.load(f)
-                return []
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"Attempt {attempt + 1} failed to load operators: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                print("Failed to load operators after all retries")
-                return []
+# ... keep existing code (безопасные функции load_operators_safe и save_operators_safe)
 
-def save_operators_safe(operators):
-    """Безопасное сохранение операторов с retry логикой"""
-    max_retries = 5
-    retry_delay = 0.1
-    
-    for attempt in range(max_retries):
-        try:
-            with lock:
-                # Сначала записываем во временный файл
-                temp_file = OPERATORS_FILE + '.tmp'
-                with open(temp_file, 'w') as f:
-                    json.dump(operators, f)
-                
-                # Атомарно заменяем оригинальный файл
-                if os.path.exists(OPERATORS_FILE):
-                    os.remove(OPERATORS_FILE)
-                os.rename(temp_file, OPERATORS_FILE)
-                return True
-        except IOError as e:
-            print(f"Attempt {attempt + 1} failed to save operators: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                print("Failed to save operators after all retries")
-                return False
-    return False
+def get_session_name(operator_id, phone_number):
+    """Создает уникальное имя сессии на основе operator_id и номера телефона"""
+    unique_string = f"{operator_id}_{phone_number}"
+    hash_object = hashlib.md5(unique_string.encode())
+    return f"session_{hash_object.hexdigest()}"
 
 @app.route('/', methods=['GET'])
 def health_check():
@@ -121,7 +81,12 @@ def send_code():
         
         async def send_code_async():
             os.makedirs("sessions", exist_ok=True)
-            client = TelegramClient(f"sessions/{operator}", api_id, api_hash)
+            session_name = get_session_name(operator, phone)
+            session_path = f"sessions/{session_name}"
+            
+            print(f"Using session: {session_path}")
+            
+            client = TelegramClient(session_path, api_id, api_hash)
             await client.connect()
             sent = await client.send_code_request(phone)
             await client.disconnect()
@@ -147,9 +112,16 @@ def verify_code():
         phone_code_hash = data.get('phone_code_hash')
         operator = data.get('operator')
         
+        print(f"Verifying code for {phone} with operator {operator}")
+        
         async def verify_code_async():
             os.makedirs("sessions", exist_ok=True)
-            client = TelegramClient(f"sessions/{operator}", api_id, api_hash)
+            session_name = get_session_name(operator, phone)
+            session_path = f"sessions/{session_name}"
+            
+            print(f"Using session: {session_path}")
+            
+            client = TelegramClient(session_path, api_id, api_hash)
             await client.connect()
             
             try:
@@ -173,10 +145,18 @@ def verify_password():
         data = request.get_json()
         password = data.get('password')
         operator = data.get('operator')
+        phone = data.get('phone')
+        
+        print(f"Verifying 2FA password for operator {operator}")
         
         async def verify_password_async():
             os.makedirs("sessions", exist_ok=True)
-            client = TelegramClient(f"sessions/{operator}", api_id, api_hash)
+            session_name = get_session_name(operator, phone)
+            session_path = f"sessions/{session_name}"
+            
+            print(f"Using session: {session_path}")
+            
+            client = TelegramClient(session_path, api_id, api_hash)
             await client.connect()
             await client.sign_in(password=password)
             await client.disconnect()
@@ -190,12 +170,25 @@ def verify_password():
 @app.route('/api/chats/<operator>', methods=['GET'])
 def get_chats(operator):
     try:
+        # Получаем номер телефона из параметров запроса
+        phone = request.args.get('phone')
+        if not phone:
+            return jsonify({'success': False, 'error': 'Phone number is required'})
+        
+        print(f"Getting chats for operator {operator} with phone {phone}")
+        
         async def get_chats_async():
             os.makedirs("sessions", exist_ok=True)
-            client = TelegramClient(f"sessions/{operator}", api_id, api_hash)
+            session_name = get_session_name(operator, phone)
+            session_path = f"sessions/{session_name}"
+            
+            print(f"Using session: {session_path}")
+            
+            client = TelegramClient(session_path, api_id, api_hash)
             await client.connect()
             
             if not await client.is_user_authorized():
+                await client.disconnect()
                 return {'success': False, 'error': 'Not authorized'}
             
             dialogs = await client.get_dialogs()
@@ -256,10 +249,20 @@ def get_chats(operator):
 def get_messages(operator, chat_id):
     try:
         chat_id = int(chat_id)
+        phone = request.args.get('phone')
+        if not phone:
+            return jsonify({'success': False, 'error': 'Phone number is required'})
+        
+        print(f"Getting messages for operator {operator}, chat {chat_id}, phone {phone}")
         
         async def get_messages_async():
             os.makedirs("sessions", exist_ok=True)
-            client = TelegramClient(f"sessions/{operator}", api_id, api_hash)
+            session_name = get_session_name(operator, phone)
+            session_path = f"sessions/{session_name}"
+            
+            print(f"Using session: {session_path}")
+            
+            client = TelegramClient(session_path, api_id, api_hash)
             await client.connect()
             
             messages = []
