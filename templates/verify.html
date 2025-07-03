@@ -1,0 +1,36 @@
+
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Подтверждение кода</title>
+</head>
+<body>
+    <h1>Подтверждение кода для {{ operator }}</h1>
+
+    {% if error %}
+        <p style="color: red;">{{ error }}</p>
+    {% endif %}
+
+    <form method="POST">
+        <p>Код отправлен на номер {{ phone }}</p>
+        {% if not code_already_entered %}
+            <input type="text" name="code" placeholder="Введите код из Telegram" required>
+        {% else %}
+            <input type="hidden" name="code" value="used">
+        {% endif %}
+        {% if password_required %}
+            <br><br>
+            <input type="password" name="password" placeholder="Введите пароль Telegram" required>
+        {% endif %}
+        <br>
+        <button type="submit" name="resend" value="1">Отправить код повторно</button>
+        <br><br>
+        <button type="submit">Войти</button>
+    </form>
+
+    <br>
+    <a href="/">← Назад к списку операторов</a>
+</body>
+</html>

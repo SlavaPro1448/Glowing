@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Чаты оператора {{ operator }}</title>
+</head>
+<body>
+    <h1>Чаты оператора {{ operator }}</h1>
+
+    <p><strong>Количество диалогов сегодня:</strong> {{ incoming_dialogs }}</p>
+    <p><strong>Непрочитанных сообщений сегодня:</strong> {{ unread_today }}</p>
+
+    <ul>
+    {% for dialog in dialogs %}
+        <li>
+            <a href="{{ url_for('chat', operator=operator, chat_id=dialog.id) }}">
+                {{ dialog.name or dialog.title or 'Без имени' }}
+            </a>
+        </li>
+    {% endfor %}
+    </ul>
+
+    <br>
+    <a href="/">← Назад к списку операторов</a>
+</body>
+</html>
