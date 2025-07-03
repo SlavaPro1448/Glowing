@@ -380,6 +380,29 @@ def get_messages(operator, chat_id):
             'error': f'Ошибка загрузки сообщений: {str(e)}'
         }), 500
 
+def save_incoming_message(phone, sender_name, message_text):
+    log_path = "messages_log.json"
+    new_entry = {
+        "phone": phone,
+        "sender": sender_name,
+        "message": message_text,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+    try:
+        if os.path.exists(log_path):
+            with open(log_path, 'r', encoding='utf-8') as f:
+                existing = json.load(f)
+        else:
+            existing = []
+
+        existing.append(new_entry)
+
+        with open(log_path, 'w', encoding='utf-8') as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ Ошибка сохранения сообщения: {e}")
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"🚀 Starting Flask app on port {port}")
