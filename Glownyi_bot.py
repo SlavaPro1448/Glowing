@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, session, url_for
+from flask import Flask, render_template, request, redirect, session, url_for, jsonify
 import asyncio
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
@@ -32,7 +32,7 @@ def list_operators():
         operator = request.form.get('operator')
         if operator:
             return redirect(url_for('login', operator=operator))
-    return render_template('operators.html', operators=operators)
+    return {'operators': operators}
 
 @app.route('/add_operator', methods=['POST'])
 def add_operator():
@@ -60,7 +60,7 @@ def login(operator):
             session.pop('phone_code_hash', None)
             session.pop('password_required', None)
             return redirect(url_for('verify'))
-    return render_template('login.html', operator=operator)
+    return f"Login page for operator: {operator}"
 
 @app.route('/verify', methods=['GET', 'POST'])
 async def verify():
@@ -86,7 +86,7 @@ async def verify():
                 error_message = "Код отправлен повторно."
             except Exception as e:
                 error_message = f"Ошибка при повторной отправке кода: {str(e)}"
-            return render_template('verify.html', operator=operator, phone=phone, error=error_message, password_required=password_required, code_already_entered=True)
+            return {'status': 'verification', 'operator': operator, 'phone': phone, 'error': error_message, 'password_required': password_required}
         code = request.form.get('code')
         # Save the code in session for later use (for password step)
         if not password_required:
@@ -122,7 +122,7 @@ async def verify():
 
         except SessionPasswordNeededError:
             session['password_required'] = True
-            return render_template('verify.html', operator=operator, phone=phone, password_required=True, code_already_entered=True)
+            return {'status': 'verification', 'operator': operator, 'phone': phone, 'error': error_message, 'password_required': True}
 
         except Exception as e:
             error_message = f"Ошибка при входе: {str(e)}"
@@ -141,7 +141,7 @@ async def verify():
         except Exception as e:
             error_message = f"Ошибка при отправке кода: {str(e)}"
 
-    return render_template('verify.html', operator=operator, phone=phone, error=error_message, password_required=password_required)
+    return {'status': 'verification', 'operator': operator, 'phone': phone, 'error': error_message, 'password_required': password_required}
 
 @app.route('/operator/<operator>')
 async def operator_chats(operator):
@@ -174,7 +174,12 @@ async def operator_chats(operator):
                         if msg.out is False and getattr(msg, 'read', True) is False and msg.date >= today:
                             unread_today += 1
 
-            return render_template('index.html', dialogs=dialogs, incoming_dialogs=incoming_dialogs, unread_today=unread_today, operator=operator)
+            return {
+                'dialogs': [d.id for d in dialogs],
+                'incoming_dialogs': incoming_dialogs,
+                'unread_today': unread_today,
+                'operator': operator
+            }
 
         except sqlite3.OperationalError as e:
             return f"Ошибка доступа к базе данных: {e}", 500
@@ -228,7 +233,10 @@ async def chat(operator, chat_id):
             'unreplied_today': received_today - replied_today,
             'unread_today': unread_count,
         }
-        return render_template('chat.html', messages=messages, stats=stats)
+        return {
+            'messages': [m.id for m in messages],
+            'stats': stats
+        }
     finally:
         await client.disconnect()
 
