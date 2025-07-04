@@ -190,6 +190,82 @@ def delete_operator(operator):
     else:
         return jsonify({'success': False, 'error': 'Operator not found'})
 
+@app.route('/api/auth/send-code', methods=['POST'])
+def send_code():
+    try:
+        data = request.get_json()
+        operator = data.get('operator')
+        phone = data.get('phone')
+
+        if not operator or not phone:
+            return jsonify({'success': False, 'error': 'Operator and phone are required'}), 400
+
+        client_key = f"{operator}_{phone}"
+        session_name = get_session_name(operator, phone)
+        os.makedirs("sessions", exist_ok=True)
+        session_path = f"sessions/{session_name}"
+        client = TelegramClient(session_path, api_id, api_hash)
+
+        async def send_code_async():
+            await client.connect()
+            if await client.is_user_authorized():
+                await client.disconnect()
+                return {'success': False, 'error': 'Already authorized'}
+
+            sent = await client.send_code_request(phone)
+            phone_code_hashes[client_key] = sent.phone_code_hash
+            await client.disconnect()
+            return {'success': True, 'phone_code_hash': sent.phone_code_hash}
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(send_code_async())
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/auth/verify-code', methods=['POST'])
+def verify_code():
+    try:
+        data = request.get_json()
+        operator = data.get('operator')
+        phone = data.get('phone')
+        code = data.get('code')
+
+        if not operator or not phone or not code:
+            return jsonify({'success': False, 'error': 'Operator, phone and code are required'}), 400
+
+        client_key = f"{operator}_{phone}"
+        session_name = get_session_name(operator, phone)
+        session_path = f"sessions/{session_name}"
+        client = TelegramClient(session_path, api_id, api_hash)
+
+        async def sign_in_async():
+            await client.connect()
+            if await client.is_user_authorized():
+                await client.disconnect()
+                return {'success': False, 'error': 'Already authorized'}
+
+            phone_code_hash = phone_code_hashes.get(client_key)
+            if not phone_code_hash:
+                await client.disconnect()
+                return {'success': False, 'error': 'Missing phone_code_hash'}
+
+            await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+            await client.disconnect()
+            return {'success': True, 'message': 'Authorization successful'}
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(sign_in_async())
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/chats/<operator>', methods=['GET'])
 def get_chats(operator):
     try:
