@@ -80,6 +80,24 @@ def get_session_name(operator_id, phone_number):
     hash_object = hashlib.md5(unique_string.encode())
     return f"session_{hash_object.hexdigest()}"
 
+def run_async_safely(coro):
+    """Безопасно запускает асинхронную функцию"""
+    try:
+        # Пытаемся получить текущий event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Если loop уже запущен, создаем новый в другом потоке
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
+        else:
+            # Если loop не запущен, можно использовать его
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        # Если нет event loop, создаем новый
+        return asyncio.run(coro)
+
 async def get_or_create_client(operator_id, phone_number):
     """
     КЛЮЧЕВАЯ ФУНКЦИЯ: Получает существующий клиент или создает новый
@@ -192,9 +210,7 @@ def send_code():
                 print(f"❌ ОШИБКА ОТПРАВКИ КОДА: {e}")
                 return {'success': False, 'error': str(e)}
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(send_code_async())
+        result = run_async_safely(send_code_async())
         return jsonify(result)
         
     except Exception as e:
@@ -249,9 +265,7 @@ def verify_code():
                 print(f"❌ ОШИБКА ПРОВЕРКИ КОДА: {e}")
                 return {'success': False, 'error': str(e)}
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(verify_code_async())
+        result = run_async_safely(verify_code_async())
         return jsonify(result)
         
     except Exception as e:
@@ -295,9 +309,7 @@ def check_password():
                 print(f"❌ ОШИБКА ПРОВЕРКИ 2FA: {e}")
                 return {'success': False, 'error': str(e)}
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(check_password_async())
+        result = run_async_safely(check_password_async())
         return jsonify(result)
         
     except Exception as e:
@@ -420,9 +432,7 @@ def get_chats(operator):
             print(f"🎯 БЫСТРО ЗАГРУЖЕНО {len(chats)} ЧАТОВ БЕЗ ПЕРЕПОДКЛЮЧЕНИЙ")
             return {'success': True, 'chats': chats}
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(get_chats_async())
+        result = run_async_safely(get_chats_async())
         return jsonify(result)
         
     except Exception as e:
@@ -517,9 +527,7 @@ def get_messages(operator, chat_id):
             print(f"🎯 БЫСТРО ЗАГРУЖЕНО {len(messages)} СООБЩЕНИЙ БЕЗ ПЕРЕПОДКЛЮЧЕНИЙ")
             return {'success': True, 'messages': messages, 'chatTitle': f'Чат {chat_id}'}
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(get_messages_async())
+        result = run_async_safely(get_messages_async())
         return jsonify(result)
         
     except Exception as e:
@@ -534,6 +542,7 @@ if __name__ == '__main__':
     print(f"🚀 Starting Flask app on port {port}")
     print(f"♻️ ДОЛГОЖИВУЩИЕ КЛИЕНТЫ: Аккаунты больше НЕ БУДУТ замораживаться!")
     print(f"🔐 ЭНДПОИНТЫ АВТОРИЗАЦИИ ДОБАВЛЕНЫ!")
+    print(f"🔧 ИСПРАВЛЕНА ПРОБЛЕМА С ASYNCIO EVENT LOOP!")
     print(f"📋 Available routes:")
     for rule in app.url_map.iter_rules():
         print(f"  {rule.methods} {rule.rule}")
