@@ -7,7 +7,7 @@ from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, AuthKeyDuplicatedError
 import os
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 import threading
 import time
 import hashlib
@@ -47,7 +47,7 @@ def setup_global_event_loop():
         print("🔄 ГЛОБАЛЬНЫЙ EVENT LOOP ЗАПУЩЕН")
         global_loop.run_forever()
     
-    if global_loop is None:
+    if global_loop is None or global_loop.is_closed():
         loop_thread = threading.Thread(target=run_event_loop, daemon=True)
         loop_thread.start()
         time.sleep(0.5)  # Даем время на запуск
@@ -56,7 +56,7 @@ def setup_global_event_loop():
 def run_async_in_global_loop(coro):
     """Запускает корутину в глобальном event loop"""
     global global_loop
-    if global_loop is None:
+    if global_loop is None or global_loop.is_closed():
         setup_global_event_loop()
     
     future = asyncio.run_coroutine_threadsafe(coro, global_loop)
@@ -407,6 +407,8 @@ def get_chats(operator):
                 
                 all_dialogs = []
                 dialog_count = 0
+                today = date.today()
+                today_start = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc)
                 
                 async for dialog in client.iter_dialogs():
                     dialog_count += 1
@@ -418,6 +420,8 @@ def get_chats(operator):
                 print(f"✅ ЗАГРУЖЕНО {len(all_dialogs)} диалогов")
                 
                 chats = []
+                total_today_incoming = 0
+                
                 for dialog in all_dialogs:
                     try:
                         if (hasattr(dialog.entity, 'bot') and dialog.entity.bot) or \
@@ -425,6 +429,9 @@ def get_chats(operator):
                             continue
                         
                         last_message = ''
+                        message_time = ''
+                        today_incoming_count = 0
+                        
                         if dialog.message:
                             if hasattr(dialog.message, 'message') and dialog.message.message:
                                 last_message = dialog.message.message
@@ -432,6 +439,27 @@ def get_chats(operator):
                                 last_message = 'Медиа файл'
                             else:
                                 last_message = 'Сообщение'
+                            
+                            # Правильное время последнего сообщения
+                            if hasattr(dialog.message, 'date') and dialog.message.date:
+                                msg_date = dialog.message.date
+                                if msg_date.date() == today:
+                                    message_time = msg_date.strftime('%H:%M')
+                                else:
+                                    message_time = msg_date.strftime('%d.%m')
+                        
+                        # Подсчет входящих сообщений за сегодня
+                        try:
+                            async for msg in client.iter_messages(dialog.id, limit=50):
+                                if msg.date and msg.date >= today_start:
+                                    if not msg.out:  # Входящее сообщение
+                                        today_incoming_count += 1
+                                else:
+                                    break  # Сообщения старше сегодняшнего дня
+                        except Exception as e:
+                            print(f"⚠️ Ошибка подсчета сообщений для {dialog.id}: {e}")
+                        
+                        total_today_incoming += today_incoming_count
                         
                         unread_count = getattr(dialog, 'unread_count', 0)
                         
@@ -455,8 +483,9 @@ def get_chats(operator):
                             'id': str(dialog.id),
                             'name': name,
                             'lastMessage': last_message[:100] + '...' if len(last_message) > 100 else last_message,
-                            'timestamp': dialog.message.date.strftime('%H:%M') if dialog.message and hasattr(dialog.message, 'date') else '',
+                            'timestamp': message_time,
                             'unreadCount': unread_count,
+                            'todayIncoming': today_incoming_count,
                             'type': 'group' if hasattr(dialog.entity, 'megagroup') or hasattr(dialog.entity, 'broadcast') else 'private'
                         }
                         chats.append(chat_info)
@@ -466,7 +495,16 @@ def get_chats(operator):
                         continue
                 
                 print(f"🎯 ЗАГРУЖЕНО {len(chats)} ЧАТОВ")
-                return {'success': True, 'chats': chats}
+                print(f"📊 ВСЕГО ВХОДЯЩИХ ЗА СЕГОДНЯ: {total_today_incoming}")
+                
+                return {
+                    'success': True, 
+                    'chats': chats,
+                    'todayStats': {
+                        'totalIncoming': total_today_incoming,
+                        'accountPhone': phone
+                    }
+                }
                 
             except Exception as e:
                 print(f"❌ ОШИБКА ЗАГРУЗКИ ЧАТОВ: {e}")
@@ -481,6 +519,8 @@ def get_chats(operator):
             'success': False, 
             'error': f'Ошибка загрузки чатов: {str(e)}'
         }), 500
+
+# ... keep existing code (get_messages endpoint and main execution)
 
 @app.route('/api/messages/<operator>/<chat_id>', methods=['GET'])
 def get_messages(operator, chat_id):
