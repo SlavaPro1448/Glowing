@@ -81,22 +81,22 @@ def get_session_name(operator_id, phone_number):
     return f"session_{hash_object.hexdigest()}"
 
 def run_async_safely(coro):
-    """Безопасно запускает асинхронную функцию"""
-    try:
-        # Пытаемся получить текущий event loop
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Если loop уже запущен, создаем новый в другом потоке
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, coro)
-                return future.result()
-        else:
-            # Если loop не запущен, можно использовать его
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        # Если нет event loop, создаем новый
-        return asyncio.run(coro)
+    """Безопасно запускает асинхронную функцию в новом потоке с новым event loop"""
+    import concurrent.futures
+    
+    def run_in_thread():
+        # Создаем новый event loop в новом потоке
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+    
+    # Запускаем в отдельном потоке
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(run_in_thread)
+        return future.result()
 
 async def get_or_create_client(operator_id, phone_number):
     """
@@ -542,7 +542,7 @@ if __name__ == '__main__':
     print(f"🚀 Starting Flask app on port {port}")
     print(f"♻️ ДОЛГОЖИВУЩИЕ КЛИЕНТЫ: Аккаунты больше НЕ БУДУТ замораживаться!")
     print(f"🔐 ЭНДПОИНТЫ АВТОРИЗАЦИИ ДОБАВЛЕНЫ!")
-    print(f"🔧 ИСПРАВЛЕНА ПРОБЛЕМА С ASYNCIO EVENT LOOP!")
+    print(f"🔧 ИСПРАВЛЕНА ПРОБЛЕМА С ASYNCIO EVENT LOOP (НОВЫЙ МЕТОД)!")
     print(f"📋 Available routes:")
     for rule in app.url_map.iter_rules():
         print(f"  {rule.methods} {rule.rule}")
