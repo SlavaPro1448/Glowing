@@ -28,6 +28,9 @@ lock = threading.Lock()
 client_pool = {}
 client_lock = threading.Lock()
 
+# Словарь для хранения phone_code_hash
+phone_code_hashes = {}
+
 def load_operators_safe():
     """Безопасная загрузка операторов из файла с файловой блокировкой"""
     with lock:
@@ -116,10 +119,6 @@ async def get_or_create_client(operator_id, phone_number):
         try:
             await client.connect()
             
-            if not await client.is_user_authorized():
-                await client.disconnect()
-                raise Exception('Клиент не авторизован - требуется повторная авторизация')
-            
             # Сохраняем клиент в пул для переиспользования
             client_pool[client_key] = client
             print(f"✅ КЛИЕНТ СОЗДАН И СОХРАНЕН В ПУЛ для {phone_number}")
@@ -150,12 +149,162 @@ def close_all_clients():
 # Регистрируем закрытие клиентов при завершении приложения
 atexit.register(close_all_clients)
 
-# Словарь для хранения phone_code_hash
-phone_code_hashes = {}
-
 @app.route('/', methods=['GET'])
 def health_check():
     return jsonify({'status': 'ok', 'message': 'Telegram API service is running'})
+
+# ============= НОВЫЕ ЭНДПОИНТЫ АВТОРИЗАЦИИ =============
+
+@app.route('/api/auth/send-code', methods=['POST'])
+def send_code():
+    try:
+        data = request.get_json()
+        phone = data.get('phone')
+        operator = data.get('operator')
+        
+        if not phone or not operator:
+            return jsonify({'success': False, 'error': 'Phone and operator are required'})
+        
+        print(f"📞 ОТПРАВКА КОДА для {phone}, оператор: {operator}")
+        
+        async def send_code_async():
+            try:
+                # Создаем или получаем клиента
+                client = await get_or_create_client(operator, phone)
+                
+                print(f"🚀 ОТПРАВЛЯЕМ КОД через Telegram API...")
+                
+                # Отправляем код
+                result = await client.send_code_request(phone)
+                phone_code_hash = result.phone_code_hash
+                
+                # Сохраняем phone_code_hash для последующего использования
+                phone_code_hashes[f"{operator}_{phone}"] = phone_code_hash
+                
+                print(f"✅ КОД ОТПРАВЛЕН для {phone}")
+                return {
+                    'success': True, 
+                    'message': 'Код отправлен в Telegram',
+                    'phone_code_hash': phone_code_hash
+                }
+                
+            except Exception as e:
+                print(f"❌ ОШИБКА ОТПРАВКИ КОДА: {e}")
+                return {'success': False, 'error': str(e)}
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(send_code_async())
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auth/verify', methods=['POST'])
+def verify_code():
+    try:
+        data = request.get_json()
+        phone = data.get('phone')
+        code = data.get('code')
+        phone_code_hash = data.get('phone_code_hash')
+        operator = data.get('operator')
+        
+        if not all([phone, code, phone_code_hash, operator]):
+            return jsonify({'success': False, 'error': 'All fields are required'})
+        
+        print(f"🔐 ПРОВЕРКА КОДА {code} для {phone}")
+        
+        async def verify_code_async():
+            try:
+                # Получаем клиента
+                client = await get_or_create_client(operator, phone)
+                
+                print(f"🚀 ПРОВЕРЯЕМ КОД через Telegram API...")
+                
+                # Проверяем код
+                try:
+                    user = await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+                    print(f"✅ КОД ПРИНЯТ для {phone}")
+                    
+                    # Получаем данные сессии
+                    session_data = client.session.save()
+                    
+                    return {
+                        'success': True,
+                        'message': 'Успешная авторизация',
+                        'session_data': session_data,
+                        'needs_password': False
+                    }
+                    
+                except SessionPasswordNeededError:
+                    print(f"🛡️ ТРЕБУЕТСЯ 2FA для {phone}")
+                    return {
+                        'success': True,
+                        'message': 'Требуется пароль двухфакторной авторизации',
+                        'needs_password': True
+                    }
+                
+            except Exception as e:
+                print(f"❌ ОШИБКА ПРОВЕРКИ КОДА: {e}")
+                return {'success': False, 'error': str(e)}
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(verify_code_async())
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auth/password', methods=['POST'])
+def check_password():
+    try:
+        data = request.get_json()
+        phone = data.get('phone')
+        password = data.get('password')
+        operator = data.get('operator')
+        
+        if not all([phone, password, operator]):
+            return jsonify({'success': False, 'error': 'All fields are required'})
+        
+        print(f"🛡️ ПРОВЕРКА 2FA для {phone}")
+        
+        async def check_password_async():
+            try:
+                # Получаем клиента
+                client = await get_or_create_client(operator, phone)
+                
+                print(f"🚀 ПРОВЕРЯЕМ ПАРОЛЬ через Telegram API...")
+                
+                # Проверяем пароль
+                user = await client.sign_in(password=password)
+                print(f"✅ 2FA ПРИНЯТ для {phone}")
+                
+                # Получаем данные сессии
+                session_data = client.session.save()
+                
+                return {
+                    'success': True,
+                    'message': 'Успешная авторизация',
+                    'session_data': session_data
+                }
+                
+            except Exception as e:
+                print(f"❌ ОШИБКА ПРОВЕРКИ 2FA: {e}")
+                return {'success': False, 'error': str(e)}
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(check_password_async())
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"💥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ============= ОСТАЛЬНЫЕ ЭНДПОИНТЫ =============
 
 @app.route('/api/operators', methods=['GET'])
 def get_operators():
@@ -189,82 +338,6 @@ def delete_operator(operator):
             return jsonify({'success': False, 'error': 'Failed to delete operator'})
     else:
         return jsonify({'success': False, 'error': 'Operator not found'})
-
-@app.route('/api/auth/send-code', methods=['POST'])
-def send_code():
-    try:
-        data = request.get_json()
-        operator = data.get('operator')
-        phone = data.get('phone')
-
-        if not operator or not phone:
-            return jsonify({'success': False, 'error': 'Operator and phone are required'}), 400
-
-        client_key = f"{operator}_{phone}"
-        session_name = get_session_name(operator, phone)
-        os.makedirs("sessions", exist_ok=True)
-        session_path = f"sessions/{session_name}"
-        client = TelegramClient(session_path, api_id, api_hash)
-
-        async def send_code_async():
-            await client.connect()
-            if await client.is_user_authorized():
-                await client.disconnect()
-                return {'success': False, 'error': 'Already authorized'}
-
-            sent = await client.send_code_request(phone)
-            phone_code_hashes[client_key] = sent.phone_code_hash
-            await client.disconnect()
-            return {'success': True, 'phone_code_hash': sent.phone_code_hash}
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(send_code_async())
-        return jsonify(result)
-
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/auth/verify-code', methods=['POST'])
-def verify_code():
-    try:
-        data = request.get_json()
-        operator = data.get('operator')
-        phone = data.get('phone')
-        code = data.get('code')
-
-        if not operator or not phone or not code:
-            return jsonify({'success': False, 'error': 'Operator, phone and code are required'}), 400
-
-        client_key = f"{operator}_{phone}"
-        session_name = get_session_name(operator, phone)
-        session_path = f"sessions/{session_name}"
-        client = TelegramClient(session_path, api_id, api_hash)
-
-        async def sign_in_async():
-            await client.connect()
-            if await client.is_user_authorized():
-                await client.disconnect()
-                return {'success': False, 'error': 'Already authorized'}
-
-            phone_code_hash = phone_code_hashes.get(client_key)
-            if not phone_code_hash:
-                await client.disconnect()
-                return {'success': False, 'error': 'Missing phone_code_hash'}
-
-            await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
-            await client.disconnect()
-            return {'success': True, 'message': 'Authorization successful'}
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(sign_in_async())
-        return jsonify(result)
-
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
 
 @app.route('/api/chats/<operator>', methods=['GET'])
 def get_chats(operator):
@@ -456,33 +529,11 @@ def get_messages(operator, chat_id):
             'error': f'Ошибка загрузки сообщений: {str(e)}'
         }), 500
 
-def save_incoming_message(phone, sender_name, message_text):
-    log_path = "messages_log.json"
-    new_entry = {
-        "phone": phone,
-        "sender": sender_name,
-        "message": message_text,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-    try:
-        if os.path.exists(log_path):
-            with open(log_path, 'r', encoding='utf-8') as f:
-                existing = json.load(f)
-        else:
-            existing = []
-
-        existing.append(new_entry)
-
-        with open(log_path, 'w', encoding='utf-8') as f:
-            json.dump(existing, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ Ошибка сохранения сообщения: {e}")
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"🚀 Starting Flask app on port {port}")
     print(f"♻️ ДОЛГОЖИВУЩИЕ КЛИЕНТЫ: Аккаунты больше НЕ БУДУТ замораживаться!")
+    print(f"🔐 ЭНДПОИНТЫ АВТОРИЗАЦИИ ДОБАВЛЕНЫ!")
     print(f"📋 Available routes:")
     for rule in app.url_map.iter_rules():
         print(f"  {rule.methods} {rule.rule}")
