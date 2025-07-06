@@ -1,6 +1,6 @@
-
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 from flask_cors import CORS
+from flask_login import LoginManager, login_required, current_user
 import asyncio
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
@@ -15,8 +15,32 @@ import fcntl
 import atexit
 import traceback
 
+# Импорты для авторизации
+from models import db, User
+from auth import auth_bp, admin_required, operator_required
+
 app = Flask(__name__)
 CORS(app)  # Разрешаем CORS для всех доменов
+
+# Конфигурация Flask
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///telegram_dashboard.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Инициализация расширений
+db.init_app(app)
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'auth.login'
+login_manager.login_message = 'Для доступа к этой странице необходимо войти в систему.'
+login_manager.login_message_category = 'info'
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(user_id)
+
+# Регистрация Blueprint'ов
+app.register_blueprint(auth_bp)
 
 # Ваши API credentials
 api_id = 24914656
@@ -61,6 +85,18 @@ def run_async_in_global_loop(coro):
     
     future = asyncio.run_coroutine_threadsafe(coro, global_loop)
     return future.result(timeout=30)  # 30 секунд таймаут
+
+def check_operator_access(operator_name):
+    """Проверяет, имеет ли текущий пользователь доступ к оператору"""
+    if not current_user.is_authenticated:
+        return False
+    
+    # Админ имеет доступ ко всем операторам
+    if current_user.is_admin():
+        return True
+    
+    # Оператор имеет доступ только к своему assigned_operator_name
+    return current_user.assigned_operator_name == operator_name
 
 def load_operators_safe():
     """Безопасная загрузка операторов из файла с файловой блокировкой"""
@@ -189,13 +225,20 @@ def cleanup_clients():
 # Регистрируем функцию очистки
 atexit.register(cleanup_clients)
 
-@app.route('/', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'ok', 'message': 'Telegram API service is running'})
+@app.route('/')
+def index():
+    """Главная страница с перенаправлением на соответствующую панель"""
+    if current_user.is_authenticated:
+        if current_user.is_admin():
+            return redirect(url_for('auth.admin_dashboard'))
+        else:
+            return redirect(url_for('auth.operator_dashboard'))
+    return redirect(url_for('auth.login'))
 
-# ============= ЭНДПОИНТЫ АВТОРИЗАЦИИ =============
+# ============= ЭНДПОИНТЫ АВТОРИЗАЦИИ (защищенные) =============
 
 @app.route('/api/auth/send-code', methods=['POST'])
+@login_required
 def send_code():
     try:
         print("📥 Получен запрос на отправку кода")
@@ -208,6 +251,10 @@ def send_code():
         if not phone or not operator:
             print("❌ Отсутствуют обязательные параметры")
             return jsonify({'success': False, 'error': 'Phone and operator are required'})
+        
+        # Проверяем права доступа
+        if not check_operator_access(operator):
+            return jsonify({'success': False, 'error': 'Доступ к этому оператору запрещен'}), 403
         
         print(f"📞 ОТПРАВКА КОДА для {phone}, оператор: {operator}")
         
@@ -247,6 +294,7 @@ def send_code():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auth/verify', methods=['POST'])
+@login_required
 def verify_code():
     try:
         print("📥 Получен запрос на проверку кода")
@@ -311,6 +359,7 @@ def verify_code():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auth/password', methods=['POST'])
+@login_required
 def check_password():
     try:
         print("📥 Получен запрос на проверку пароля 2FA")
@@ -355,14 +404,22 @@ def check_password():
         print(f"💥 TRACEBACK: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ============= ОСТАЛЬНЫЕ ЭНДПОИНТЫ =============
-
 @app.route('/api/operators', methods=['GET'])
+@login_required
 def get_operators():
-    operators = load_operators_safe()
-    return jsonify({'operators': operators})
+    """Получение списка операторов (админ - все, оператор - только свой)"""
+    if current_user.is_admin():
+        operators = load_operators_safe()
+        return jsonify({'operators': operators})
+    else:
+        # Оператор видит только себя
+        if current_user.assigned_operator_name:
+            return jsonify({'operators': [current_user.assigned_operator_name]})
+        else:
+            return jsonify({'operators': []})
 
 @app.route('/api/operators', methods=['POST'])
+@admin_required
 def add_operator():
     data = request.get_json()
     operator = data.get('operator')
@@ -377,6 +434,7 @@ def add_operator():
     return jsonify({'success': False, 'error': 'Operator already exists or invalid'})
 
 @app.route('/api/operators/<operator>', methods=['DELETE'])
+@admin_required
 def delete_operator(operator):
     operators = load_operators_safe()
     original_count = len(operators)
@@ -391,8 +449,13 @@ def delete_operator(operator):
         return jsonify({'success': False, 'error': 'Operator not found'})
 
 @app.route('/api/chats/<operator>', methods=['GET'])
+@login_required
 def get_chats(operator):
     try:
+        # Проверяем права доступа
+        if not check_operator_access(operator):
+            return jsonify({'success': False, 'error': 'Доступ к этому оператору запрещен'}), 403
+        
         phone = request.args.get('phone')
         if not phone:
             return jsonify({'success': False, 'error': 'Phone number is required'})
@@ -520,11 +583,14 @@ def get_chats(operator):
             'error': f'Ошибка загрузки чатов: {str(e)}'
         }), 500
 
-# ... keep existing code (get_messages endpoint and main execution)
-
 @app.route('/api/messages/<operator>/<chat_id>', methods=['GET'])
+@login_required
 def get_messages(operator, chat_id):
     try:
+        # Проверяем права доступа
+        if not check_operator_access(operator):
+            return jsonify({'success': False, 'error': 'Доступ к этому оператору запрещен'}), 403
+        
         chat_id = int(chat_id)
         phone = request.args.get('phone')
         if not phone:
@@ -618,16 +684,37 @@ def get_messages(operator, chat_id):
             'error': f'Ошибка загрузки сообщений: {str(e)}'
         }), 500
 
+def create_admin_user():
+    """Создает администратора по умолчанию"""
+    with app.app_context():
+        admin = User.query.filter_by(username='admin').first()
+        if not admin:
+            admin = User(
+                username='admin',
+                role='admin',
+                assigned_operator_name='admin'
+            )
+            admin.set_password('admin123')
+            db.session.add(admin)
+            db.session.commit()
+            print("✅ СОЗДАН АДМИНИСТРАТОР ПО УМОЛЧАНИЮ: admin/admin123")
+
 if __name__ == '__main__':
     # Настраиваем глобальный event loop перед запуском Flask
     setup_global_event_loop()
+    
+    # Создаем таблицы и администратора
+    with app.app_context():
+        db.create_all()
+        create_admin_user()
     
     port = int(os.environ.get('PORT', 5000))
     print(f"🚀 Starting Flask app on port {port}")
     print(f"✅ ГЛОБАЛЬНЫЙ ПУЛ КЛИЕНТОВ ВОССТАНОВЛЕН!")
     print(f"🔄 ASYNCIO EVENT LOOP ИСПРАВЛЕН!")
     print(f"📡 НЕПРЕРЫВНЫЙ МОНИТОРИНГ ДОСТУПЕН!")
-    print(f"🔐 ЭНДПОИНТЫ АВТОРИЗАЦИИ АКТИВНЫ!")
+    print(f"🔐 СИСТЕМА АВТОРИЗАЦИИ АКТИВНА!")
+    print(f"👤 АДМИН ПО УМОЛЧАНИЮ: admin/admin123")
     print(f"📋 Available routes:")
     for rule in app.url_map.iter_rules():
         print(f"  {rule.methods} {rule.rule}")
