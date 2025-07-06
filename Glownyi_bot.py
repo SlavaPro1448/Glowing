@@ -242,7 +242,7 @@ async def create_client(operator_name, account_name=None):
 
 # API методы для Telegram
 @app.route('/api/send_code', methods=['POST'])
-async def send_code():
+def send_code():
     try:
         data = request.json
         phone = data.get('phone')
@@ -252,22 +252,262 @@ async def send_code():
         if not phone or not operator:
             return jsonify({'error': 'Номер телефона и оператор обязательны'}), 400
         
-        client = await create_client(operator, account)
-        await client.connect()
+        async def _send_code():
+            client = await create_client(operator, account)
+            await client.connect()
+            
+            result = await client.send_code_request(phone)
+            phone_code_hash = result.phone_code_hash
+            
+            return {
+                'success': True,
+                'phone_code_hash': phone_code_hash,
+                'message': f'Код отправлен на номер {phone}'
+            }
         
-        result = await client.send_code_request(phone)
-        phone_code_hash = result.phone_code_hash
-        
-        return jsonify({
-            'success': True,
-            'phone_code_hash': phone_code_hash,
-            'message': f'Код отправлен на номер {phone}'
-        })
+        result = asyncio.run(_send_code())
+        return jsonify(result)
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# ... keep existing code (остальные API методы для Telegram)
+@app.route('/api/verify_code', methods=['POST'])
+def verify_code():
+    try:
+        data = request.json
+        phone = data.get('phone')
+        code = data.get('code')
+        phone_code_hash = data.get('phone_code_hash')
+        operator = data.get('operator')
+        account = data.get('account', 'main')
+        
+        if not all([phone, code, phone_code_hash, operator]):
+            return jsonify({'error': 'Все поля обязательны'}), 400
+        
+        async def _verify_code():
+            client = await create_client(operator, account)
+            await client.connect()
+            
+            try:
+                await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+                return {
+                    'success': True,
+                    'message': 'Авторизация успешна'
+                }
+            except Exception as e:
+                if 'Two-steps verification is enabled' in str(e):
+                    return {
+                        'success': False,
+                        'two_factor_required': True,
+                        'message': 'Требуется двухфакторная аутентификация'
+                    }
+                else:
+                    raise e
+        
+        result = asyncio.run(_verify_code())
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/verify_password', methods=['POST'])
+def verify_password():
+    try:
+        data = request.json
+        password = data.get('password')
+        operator = data.get('operator')
+        account = data.get('account', 'main')
+        
+        if not all([password, operator]):
+            return jsonify({'error': 'Пароль и оператор обязательны'}), 400
+        
+        async def _verify_password():
+            client = await create_client(operator, account)
+            await client.connect()
+            
+            await client.sign_in(password=password)
+            return {
+                'success': True,
+                'message': 'Двухфакторная аутентификация пройдена'
+            }
+        
+        result = asyncio.run(_verify_password())
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/chats/<operator_name>')
+def get_chats(operator_name):
+    try:
+        account = request.args.get('account', 'main')
+        
+        async def _get_chats():
+            client = await create_client(operator_name, account)
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                return {'error': 'Пользователь не авторизован'}
+            
+            chats = []
+            async for dialog in client.iter_dialogs():
+                chat_info = {
+                    'id': dialog.id,
+                    'name': dialog.name,
+                    'type': 'channel' if dialog.is_channel else 'group' if dialog.is_group else 'user',
+                    'unread_count': dialog.unread_count,
+                    'last_message': {
+                        'text': dialog.message.text if dialog.message else '',
+                        'date': dialog.message.date.isoformat() if dialog.message else None
+                    }
+                }
+                chats.append(chat_info)
+            
+            return {'chats': chats}
+        
+        result = asyncio.run(_get_chats())
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/chat_messages/<operator_name>/<int:chat_id>')
+def get_chat_messages(operator_name, chat_id):
+    try:
+        account = request.args.get('account', 'main')
+        limit = int(request.args.get('limit', 50))
+        
+        async def _get_messages():
+            client = await create_client(operator_name, account)
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                return {'error': 'Пользователь не авторизован'}
+            
+            messages = []
+            async for message in client.iter_messages(chat_id, limit=limit):
+                msg_info = {
+                    'id': message.id,
+                    'text': message.text,
+                    'date': message.date.isoformat(),
+                    'sender_id': message.sender_id,
+                    'sender_name': getattr(message.sender, 'first_name', '') if message.sender else '',
+                    'is_outgoing': message.out
+                }
+                messages.append(msg_info)
+            
+            return {'messages': messages}
+        
+        result = asyncio.run(_get_messages())
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/send_message', methods=['POST'])
+def send_message():
+    try:
+        data = request.json
+        operator = data.get('operator')
+        account = data.get('account', 'main')
+        chat_id = data.get('chat_id')
+        message_text = data.get('message')
+        
+        if not all([operator, chat_id, message_text]):
+            return jsonify({'error': 'Все поля обязательны'}), 400
+        
+        async def _send_message():
+            client = await create_client(operator, account)
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                return {'error': 'Пользователь не авторизован'}
+            
+            await client.send_message(chat_id, message_text)
+            return {
+                'success': True,
+                'message': 'Сообщение отправлено'
+            }
+        
+        result = asyncio.run(_send_message())
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/operators')
+def get_operators():
+    try:
+        operators = []
+        sessions_dir = 'sessions'
+        
+        if os.path.exists(sessions_dir):
+            for filename in os.listdir(sessions_dir):
+                if filename.endswith('.session'):
+                    operator_name = filename.replace('.session', '')
+                    operators.append({
+                        'name': operator_name,
+                        'session_file': filename
+                    })
+        
+        return jsonify({'operators': operators})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/check_auth/<operator_name>')
+def check_auth(operator_name):
+    try:
+        account = request.args.get('account', 'main')
+        
+        async def _check_auth():
+            client = await create_client(operator_name, account)
+            await client.connect()
+            
+            is_authorized = await client.is_user_authorized()
+            return {
+                'is_authorized': is_authorized,
+                'operator': operator_name,
+                'account': account
+            }
+        
+        result = asyncio.run(_check_auth())
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/logout/<operator_name>', methods=['POST'])
+def logout_telegram(operator_name):
+    try:
+        account = request.args.get('account', 'main')
+        
+        async def _logout():
+            client = await create_client(operator_name, account)
+            await client.connect()
+            
+            await client.log_out()
+            
+            # Удаляем клиент из памяти
+            client_key = f"{operator_name}_{account}" if account != 'main' else operator_name
+            if client_key in clients:
+                del clients[client_key]
+            
+            # Удаляем файл сессии
+            session_file = get_session_file(operator_name, account)
+            if os.path.exists(session_file):
+                os.remove(session_file)
+            
+            return {
+                'success': True,
+                'message': 'Выход выполнен успешно'
+            }
+        
+        result = asyncio.run(_logout())
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 def create_admin_user():
     """Создание администратора по умолчанию"""
@@ -440,10 +680,25 @@ OPERATOR_DASHBOARD_TEMPLATE = BASE_TEMPLATE.replace('{% block content %}{% endbl
         <h5><i class="fab fa-telegram-plane"></i> Мои Telegram чаты</h5>
     </div>
     <div class="card-body">
+        {% if current_user.assigned_operator_name %}
         <p class="text-muted">
             <i class="fas fa-info-circle"></i> 
-            Панель оператора для работы с Telegram чатами.
+            Оператор: {{ current_user.assigned_operator_name }}
         </p>
+        <div class="d-flex gap-2">
+            <a href="/api/chats/{{ current_user.assigned_operator_name }}" class="btn btn-primary" target="_blank">
+                <i class="fas fa-comments"></i> Просмотреть мои чаты (API)
+            </a>
+            <a href="/api/check_auth/{{ current_user.assigned_operator_name }}" class="btn btn-info" target="_blank">
+                <i class="fas fa-check-circle"></i> Проверить авторизацию
+            </a>
+        </div>
+        {% else %}
+        <div class="alert alert-warning">
+            <i class="fas fa-exclamation-triangle"></i>
+            У вас не настроен доступ к Telegram. Обратитесь к администратору для назначения оператора.
+        </div>
+        {% endif %}
     </div>
 </div>
 ''')
