@@ -1,4 +1,8 @@
 
+
+Flask-Login==0.6.3
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
 Flask==2.3.3
 Flask-CORS==4.0.0
 Telethon==1.29.3
