@@ -1,11 +1,8 @@
 
-from flask import Flask, request, jsonify, render_template, redirect, url_for, flash
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, flash, session
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, SelectField, SubmitField
-from wtforms.validators import DataRequired, Length, ValidationError
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 from telethon import TelegramClient
@@ -61,24 +58,6 @@ class User(UserMixin, db.Model):
     def __repr__(self):
         return f'<User {self.username}>'
 
-# Формы
-class LoginForm(FlaskForm):
-    username = StringField('Логин', validators=[DataRequired(), Length(min=3, max=80)])
-    password = PasswordField('Пароль', validators=[DataRequired()])
-    submit = SubmitField('Войти')
-
-class AddUserForm(FlaskForm):
-    username = StringField('Логин', validators=[DataRequired(), Length(min=3, max=80)])
-    password = PasswordField('Пароль', validators=[DataRequired(), Length(min=6)])
-    role = SelectField('Роль', choices=[('operator', 'Оператор'), ('admin', 'Администратор')], validators=[DataRequired()])
-    assigned_operator_name = StringField('Имя оператора (для Telegram)', validators=[Length(max=100)])
-    submit = SubmitField('Добавить пользователя')
-    
-    def validate_username(self, username):
-        user = User.query.filter_by(username=username.data).first()
-        if user:
-            raise ValidationError('Пользователь с таким логином уже существует.')
-
 # Настройка Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -130,22 +109,27 @@ def login():
         else:
             return redirect(url_for('operator_dashboard'))
     
-    form = LoginForm()
-    if form.validate_on_submit():
-        user = User.query.filter_by(username=form.username.data).first()
-        if user and user.check_password(form.password.data) and user.is_active:
-            login_user(user)
-            flash(f'Добро пожаловать, {user.username}!', 'success')
-            
-            # Перенаправляем в зависимости от роли
-            if user.is_admin():
-                return redirect(url_for('admin_dashboard'))
-            else:
-                return redirect(url_for('operator_dashboard'))
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if not username or not password:
+            flash('Введите логин и пароль.', 'error')
         else:
-            flash('Неверный логин или пароль.', 'error')
+            user = User.query.filter_by(username=username).first()
+            if user and user.check_password(password) and user.is_active:
+                login_user(user)
+                flash(f'Добро пожаловать, {user.username}!', 'success')
+                
+                # Перенаправляем в зависимости от роли
+                if user.is_admin():
+                    return redirect(url_for('admin_dashboard'))
+                else:
+                    return redirect(url_for('operator_dashboard'))
+            else:
+                flash('Неверный логин или пароль.', 'error')
     
-    return render_template_string(LOGIN_TEMPLATE, form=form)
+    return render_template_string(LOGIN_TEMPLATE)
 
 @app.route('/logout')
 @login_required
@@ -168,25 +152,39 @@ def operator_dashboard():
 @app.route('/admin/add_user', methods=['GET', 'POST'])
 @admin_required
 def add_user():
-    form = AddUserForm()
-    if form.validate_on_submit():
-        user = User(
-            username=form.username.data,
-            role=form.role.data,
-            assigned_operator_name=form.assigned_operator_name.data
-        )
-        user.set_password(form.password.data)
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        role = request.form.get('role')
+        assigned_operator_name = request.form.get('assigned_operator_name')
         
-        try:
-            db.session.add(user)
-            db.session.commit()
-            flash(f'Пользователь {user.username} успешно добавлен.', 'success')
-            return redirect(url_for('admin_dashboard'))
-        except Exception as e:
-            db.session.rollback()
-            flash(f'Ошибка при добавлении пользователя: {str(e)}', 'error')
+        # Валидация
+        if not username or len(username) < 3:
+            flash('Логин должен содержать минимум 3 символа.', 'error')
+        elif not password or len(password) < 6:
+            flash('Пароль должен содержать минимум 6 символов.', 'error')
+        elif not role or role not in ['operator', 'admin']:
+            flash('Выберите корректную роль.', 'error')
+        elif User.query.filter_by(username=username).first():
+            flash('Пользователь с таким логином уже существует.', 'error')
+        else:
+            user = User(
+                username=username,
+                role=role,
+                assigned_operator_name=assigned_operator_name
+            )
+            user.set_password(password)
+            
+            try:
+                db.session.add(user)
+                db.session.commit()
+                flash(f'Пользователь {user.username} успешно добавлен.', 'success')
+                return redirect(url_for('admin_dashboard'))
+            except Exception as e:
+                db.session.rollback()
+                flash(f'Ошибка при добавлении пользователя: {str(e)}', 'error')
     
-    return render_template_string(ADD_USER_TEMPLATE, form=form)
+    return render_template_string(ADD_USER_TEMPLATE)
 
 @app.route('/admin/delete_user/<user_id>')
 @admin_required
@@ -211,7 +209,7 @@ API_ID = os.environ.get('TELEGRAM_API_ID')
 API_HASH = os.environ.get('TELEGRAM_API_HASH')
 
 if not API_ID or not API_HASH:
-    raise ValueError("Необходимо установить TELEGRAM_API_ID и TELEGRAM_API_HASH в переменных окружения")
+    print("Внимание: TELEGRAM_API_ID и TELEGRAM_API_HASH не установлены")
 
 # Хранилище клиентов Telegram
 clients = {}
@@ -231,6 +229,9 @@ def get_session_file(operator_name, account_name=None):
 
 async def create_client(operator_name, account_name=None):
     """Создать клиент Telegram"""
+    if not API_ID or not API_HASH:
+        raise ValueError("TELEGRAM_API_ID и TELEGRAM_API_HASH должны быть установлены")
+    
     session_file = get_session_file(operator_name, account_name)
     client_key = f"{operator_name}_{account_name}" if account_name else operator_name
     
@@ -589,17 +590,16 @@ LOGIN_TEMPLATE = BASE_TEMPLATE.replace('{% block content %}{% endblock %}', '''
             </div>
             <div class="card-body">
                 <form method="POST">
-                    {{ form.hidden_tag() }}
                     <div class="mb-3">
-                        {{ form.username.label(class="form-label") }}
-                        {{ form.username(class="form-control") }}
+                        <label for="username" class="form-label">Логин</label>
+                        <input type="text" class="form-control" id="username" name="username" required minlength="3" maxlength="80">
                     </div>
                     <div class="mb-3">
-                        {{ form.password.label(class="form-label") }}
-                        {{ form.password(class="form-control") }}
+                        <label for="password" class="form-label">Пароль</label>
+                        <input type="password" class="form-control" id="password" name="password" required>
                     </div>
                     <div class="d-grid">
-                        {{ form.submit(class="btn btn-primary btn-lg") }}
+                        <button type="submit" class="btn btn-primary btn-lg">Войти</button>
                     </div>
                 </form>
             </div>
@@ -712,38 +712,41 @@ ADD_USER_TEMPLATE = BASE_TEMPLATE.replace('{% block content %}{% endblock %}', '
             </div>
             <div class="card-body">
                 <form method="POST">
-                    {{ form.hidden_tag() }}
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
-                                {{ form.username.label(class="form-label") }}
-                                {{ form.username(class="form-control") }}
+                                <label for="username" class="form-label">Логин</label>
+                                <input type="text" class="form-control" id="username" name="username" required minlength="3" maxlength="80">
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="mb-3">
-                                {{ form.password.label(class="form-label") }}
-                                {{ form.password(class="form-control") }}
+                                <label for="password" class="form-label">Пароль</label>
+                                <input type="password" class="form-control" id="password" name="password" required minlength="6">
                             </div>
                         </div>
                     </div>
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
-                                {{ form.role.label(class="form-label") }}
-                                {{ form.role(class="form-select") }}
+                                <label for="role" class="form-label">Роль</label>
+                                <select class="form-select" id="role" name="role" required>
+                                    <option value="">Выберите роль</option>
+                                    <option value="operator">Оператор</option>
+                                    <option value="admin">Администратор</option>
+                                </select>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="mb-3">
-                                {{ form.assigned_operator_name.label(class="form-label") }}
-                                {{ form.assigned_operator_name(class="form-control") }}
+                                <label for="assigned_operator_name" class="form-label">Имя оператора (для Telegram)</label>
+                                <input type="text" class="form-control" id="assigned_operator_name" name="assigned_operator_name" maxlength="100">
                             </div>
                         </div>
                     </div>
                     <div class="d-flex justify-content-between">
                         <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary">Назад</a>
-                        {{ form.submit(class="btn btn-success") }}
+                        <button type="submit" class="btn btn-success">Добавить пользователя</button>
                     </div>
                 </form>
             </div>
